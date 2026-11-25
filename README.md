@@ -101,4 +101,4 @@ MIT, Armaan Francisco Shivpuri. Direct dependencies: fastmcp (Apache-2.0), anthr
 
 ## Part of Manez
 
-This is the access-control layer of [Manez](https://github.com/ARMINSHIVES). The other parts are [grounded-kb](https://github.com/ARMINSHIVES/grounded-kb), [limit-aware-launcher](https://github.com/ARMINSHIVES/limit-aware-launcher) and [social-publisher](https://github.com/ARMINSHIVES/social-publisher).
+This is the access-control layer of [Manez](https://github.com/ARMINSHIVES). The other parts are [grounded-kb](https://github.com/ARMINSHIVES/grounded-kb), [limit-aware-launcher](https://github.com/ARMINSHIVES/limit-aware-launcher) and [social-publisher](https://github.com/ARMINSHIVES/social-publisher). In Manez the hub also serves the voice assistant: it sends code, long writing and explicit requests to `ask_model` (deep only when asked for by name), and uses `hub_search_tools` then `hub_call` for tool turns.
