@@ -126,11 +126,13 @@ class FakeModels:
     """Stands in for the Anthropic API: fixed token counts, priced with the real price table."""
     def __init__(self):
         self.calls = []
+        self.json_reply = None     # set to a JSON string to answer schema calls with it
 
-    async def api(self, model, system, prompt, max_tokens):
+    async def api(self, model, system, prompt, max_tokens, json_schema=None):
         from hub.models import cost
-        self.calls.append((model, prompt, max_tokens))
-        return Reply(f"[{model}] answer to: {prompt[:40]}", 100, 50, cost(model, 100, 50), "api")
+        self.calls.append((model, prompt, max_tokens, json_schema))
+        text = self.json_reply if json_schema else f"[{model}] answer to: {prompt[:40]}"
+        return Reply(text, 100, 50, cost(model, 100, 50), "api")
 
 
 @pytest.fixture

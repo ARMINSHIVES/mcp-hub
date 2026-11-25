@@ -91,10 +91,15 @@ def build(settings: config.Settings | None = None, state=None, tokens: dict[str,
             max_tokens: Annotated[int, Field(description="Output cap; always set it as low as the task allows.")] = 1024,
             system: Annotated[str | None, Field(description="Optional system prompt.")] = None,
             explicit_user_request: Annotated[bool, Field(description="True only when the human explicitly asked for "
-                                                                     "the deep model.")] = False) -> dict:
+                                                                     "the deep model.")] = False,
+            json_schema: Annotated[dict | None, Field(description="Optional JSON Schema the reply must match. Objects "
+                                                                  "need additionalProperties: false. The parsed value "
+                                                                  "comes back as `json`; a mismatch comes back as "
+                                                                  "`error`.")] = None) -> dict:
         """Ask a larger Claude model (Haiku/Sonnet/Opus 5.5) and get its text answer. Spend is capped per call, per
-        day and per month; the result reports the cost."""
-        return await asker.ask(current_profile(profiles), prompt, tier, max_tokens, system, explicit_user_request)
+        day and per month; the result reports the cost. A reply cut at max_tokens comes back with truncated: true."""
+        return await asker.ask(current_profile(profiles), prompt, tier, max_tokens, system, explicit_user_request,
+                               json_schema)
 
     @hub.tool(annotations={"readOnlyHint": True})
     async def hub_search_tools(query: str, k: int = 5) -> list[dict]:

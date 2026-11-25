@@ -9,12 +9,20 @@ caps it the same way.
 Order of checks per call: tier ceiling, max_tokens cap, per-call cap, daily cap per profile, monthly hard stop.
 The estimate (prompt at 3 chars per token, plus max_tokens of output) is reserved in the ledger before the call so two
 calls at once can't both slip under a cap, then replaced by the real cost.
+
+A reply cut at max_tokens comes back with `truncated: true` (ledger status "truncated"). The API returns the head of
+the reply, marked. `claude -p` continues past CLAUDE_CODE_MAX_OUTPUT_TOKENS and its `result` keeps only the last
+piece, so on that backend the text is dropped and the result carries an `error` instead.
+With `json_schema`, the backend constrains the reply (API output_config, CLI --json-schema), the hub validates it with
+jsonschema and returns the value as `json`, or an `error` (ledger status "invalid") when it doesn't match.
 """
 import asyncio
 import json
 import os
 import subprocess
 from dataclasses import dataclass
+
+import jsonschema
 
 from fastmcp.exceptions import ToolError
 
@@ -50,14 +58,17 @@ class Reply:
     output_tokens: int
     cost_usd: float
     backend: str
+    truncated: bool = False
+    structured: object = None     # claude -p --json-schema puts the parsed value here, not in the text
 
 
-async def call_api(model: str, system: str, prompt: str, max_tokens: int) -> Reply:
+async def call_api(model: str, system: str, prompt: str, max_tokens: int, json_schema: dict | None = None) -> Reply:
     import anthropic
     client = anthropic.AsyncAnthropic(api_key=secret("ANTHROPIC_API_KEY"))
+    extra = {"output_config": {"format": {"type": "json_schema", "schema": json_schema}}} if json_schema else {}
     try:
         msg = await client.messages.create(model=model, max_tokens=max_tokens, system=system,
-                                           messages=[{"role": "user", "content": prompt}])
+                                           messages=[{"role": "user", "content": prompt}], **extra)
     except anthropic.RateLimitError as e:
         raise ToolError(f"Anthropic rate limit: {e.message}") from e
     except anthropic.APIStatusError as e:
@@ -74,7 +85,7 @@ async def call_api(model: str, system: str, prompt: str, max_tokens: int) -> Rep
     elif msg.stop_reason == "max_tokens":
         text += "\n[cut off at max_tokens]"
     return Reply(text, u.input_tokens + cw + cr, u.output_tokens, cost(model, u.input_tokens, u.output_tokens, cw, cr),
-                 "api")
+                 "api", truncated=msg.stop_reason == "max_tokens")
 
 
 def find_claude() -> str | None:
@@ -94,7 +105,8 @@ def find_claude() -> str | None:
     return max(found, key=os.path.getmtime) if found else None
 
 
-async def call_cli(model: str, system: str, prompt: str, max_tokens: int, budget_usd: float) -> Reply:
+async def call_cli(model: str, system: str, prompt: str, max_tokens: int, budget_usd: float,
+                   json_schema: dict | None = None) -> Reply:
     exe = find_claude()
     if not exe:
         raise ToolError("No ANTHROPIC_API_KEY and no claude CLI found, so ask_model has no backend.")
@@ -102,6 +114,8 @@ async def call_cli(model: str, system: str, prompt: str, max_tokens: int, budget
     cmd = [exe, "-p", "--model", model, "--output-format", "json", "--tools", "", "--strict-mcp-config",
            "--no-session-persistence", "--disable-slash-commands", "--system-prompt", system,
            "--max-budget-usd", f"{max(budget_usd, 0.01):.2f}"]
+    if json_schema:
+        cmd += ["--json-schema", json.dumps(json_schema)]
     env = {k: v for k, v in os.environ.items() if not k.startswith("HUB_TOKEN_")}
     env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
 
@@ -118,9 +132,16 @@ async def call_cli(model: str, system: str, prompt: str, max_tokens: int, budget
         raise ToolError(f"claude -p failed (exit {p.returncode}): {(p.stderr or p.stdout)[-300:]}") from e
     u = out.get("usage") or {}
     inp = (u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
-    reply = Reply(out.get("result") or "", inp, u.get("output_tokens") or 0, float(out.get("total_cost_usd") or 0), "cli")
+    out_tok = u.get("output_tokens") or 0
+    # Past CLAUDE_CODE_MAX_OUTPUT_TOKENS, claude -p asks the model to continue and `result` holds only the last
+    # message, the tail of the reply. Flag it on any sign: the stop reason, output at or over the cap, or (without a
+    # schema, whose structured-output tool call takes its own turn) more than one turn.
+    truncated = (out.get("stop_reason") == "max_tokens" or out_tok >= max_tokens
+                 or (not json_schema and (out.get("num_turns") or 1) > 1))
+    reply = Reply(out.get("result") or "", inp, out_tok, float(out.get("total_cost_usd") or 0), "cli", truncated,
+                  out.get("structured_output"))
     if out.get("is_error"):
-        raise ToolError(f"claude -p reported an error: {reply.text[:300]}")
+        raise ToolError(f"claude -p reported an error: {reply.text[:300] or out.get('subtype')}")
     return reply
 
 
@@ -149,14 +170,22 @@ class Asker:
                             "Raise budget.monthly_usd in profiles.toml to allow more.")
 
     async def ask(self, profile: Profile, prompt: str, tier: str = "fast", max_tokens: int = 1024,
-                  system: str | None = None, explicit_user_request: bool = False) -> dict:
+                  system: str | None = None, explicit_user_request: bool = False,
+                  json_schema: dict | None = None) -> dict:
         model = TIER_MODEL.get(tier, "")
         system = system or DEFAULT_SYSTEM
         use_api = bool(secret("ANTHROPIC_API_KEY"))
-        in_est = (len(prompt) + len(system)) // CHARS_PER_TOKEN + 1 + (0 if use_api else CLI_OVERHEAD_TOKENS)
+        schema_len = len(json.dumps(json_schema)) if json_schema else 0
+        in_est = ((len(prompt) + len(system) + schema_len) // CHARS_PER_TOKEN + 1
+                  + (0 if use_api else CLI_OVERHEAD_TOKENS))
         # claude -p writes its prompt to the cache on most calls, so the CLI estimate prices input as cache writes.
         est = (cost(model, in_est, max_tokens) if use_api else cost(model, 0, max_tokens, cache_write=in_est))             if model else 0.0
         try:
+            if json_schema is not None:
+                try:
+                    jsonschema.validators.validator_for(json_schema).check_schema(json_schema)
+                except jsonschema.SchemaError as e:
+                    raise ToolError(f"json_schema is not a valid JSON Schema: {e.message}") from e
             self._check(profile, tier, max_tokens, explicit_user_request, est)
         except ToolError:
             self.ledger.record(profile.name, tier, model, "-", 0, 0, 0.0, "blocked")
@@ -164,17 +193,51 @@ class Asker:
         row = self.ledger.record(profile.name, tier, model, "api" if use_api else "cli", in_est, max_tokens, est,
                                  "pending")
         try:
-            r = await (self.api(model, system, prompt, max_tokens) if use_api
-                       else self.cli(model, system, prompt, max_tokens, profile.per_call_usd))
+            # the schema goes to the backend only when given, so calls without one are made exactly as before
+            sch = (json_schema,) if json_schema else ()
+            r = await (self.api(model, system, prompt, max_tokens, *sch) if use_api
+                       else self.cli(model, system, prompt, max_tokens, profile.per_call_usd, *sch))
         except Exception:
             self.ledger.settle(row, 0, 0, 0.0, "error")   # a failed call is not billed by either backend
             raise
-        self.ledger.settle(row, r.input_tokens, r.output_tokens, r.cost_usd, "ok")
-        month = self.ledger.month_spend()
         res = {"text": r.text, "model": model, "tier": tier, "backend": r.backend, "input_tokens": r.input_tokens,
-               "output_tokens": r.output_tokens, "cost_usd": round(r.cost_usd, 6),
-               "month_usd": round(month, 4), "month_cap_usd": self.budget.monthly_usd}
+               "output_tokens": r.output_tokens, "cost_usd": round(r.cost_usd, 6)}
+        status = "ok"
+        if r.truncated:
+            status, res["truncated"] = "truncated", True
+            if r.backend == "cli":
+                res["text"] = ""
+                res["error"] = (f"The reply passed max_tokens={max_tokens}. claude -p returns only the tail of a cut "
+                                "reply, so it was dropped. Raise max_tokens or ask for a shorter answer.")
+            elif json_schema:
+                res["error"] = f"The reply was cut off at max_tokens={max_tokens}, so it isn't complete JSON."
+        elif json_schema:
+            value, error = self._parse(r, json_schema)
+            if error:
+                status, res["error"] = "invalid", error
+            else:
+                res["json"] = value
+                res["text"] = r.text or json.dumps(value)
+        self.ledger.settle(row, r.input_tokens, r.output_tokens, r.cost_usd, status)
+        month = self.ledger.month_spend()
+        res.update(month_usd=round(month, 4), month_cap_usd=self.budget.monthly_usd)
         if month >= self.budget.warn_fraction * self.budget.monthly_usd:
             res["warning"] = (f"Monthly model spend is ${month:.2f} of ${self.budget.monthly_usd:.2f} "
                               f"({month / self.budget.monthly_usd:.0%}).")
         return res
+
+    @staticmethod
+    def _parse(r: Reply, schema: dict) -> tuple[object, str | None]:
+        """The reply's JSON value and None, or None and why it doesn't satisfy the schema."""
+        value = r.structured
+        if value is None:
+            try:
+                value = json.loads(r.text)
+            except ValueError:
+                return None, f"The reply is not JSON: {r.text[:200]!r}"
+        try:
+            jsonschema.validate(value, schema)
+        except jsonschema.ValidationError as e:
+            where = "/".join(map(str, e.absolute_path)) or "(root)"
+            return None, f"The reply doesn't match json_schema at {where}: {e.message}"
+        return value, None
