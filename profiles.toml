@@ -1,0 +1,62 @@
+# Who may use which hub tools. Default deny: a tool is visible and callable only if a pattern in `allow` matches
+# its hub name (fnmatch, e.g. "kb_*") and no pattern in `deny` does. Hub names are "<backend>_<tool>" for proxied
+# backends, plus the hub's own tools: ask_model, hub_search_tools, hub_call.
+#
+# max_tier: highest ask_model tier this profile may use (fast < standard < deep).
+# deep_on_user_command: the profile may go one step past max_tier to "deep" only when the call sets
+#   explicit_user_request=true (the caller sets it only when the human literally asked for the big model).
+# daily_usd / per_call_usd: ask_model spend caps for this profile. max_tokens: largest max_tokens one call may ask for.
+# Tokens: `python -m hub tokens init` creates one per profile and stores only its SHA-256 in state/tokens.json.
+#
+# The profiles below are examples, one per agent. Rename, add or remove them freely.
+
+[budget]
+monthly_usd = 20.0      # hard stop for all profiles together, per calendar month (UTC)
+warn_fraction = 0.8     # results carry a warning once month spend passes this share
+
+[profiles.coder]
+allow = ["kb_*", "context7_*", "github_*", "playwright_*", "ask_model"]
+deny = ["playwright_browser_run_code_unsafe", "playwright_browser_file_upload"]   # arbitrary code; local files out
+max_tier = "standard"
+daily_usd = 1.00
+per_call_usd = 0.25
+max_tokens = 4000
+
+[profiles.writer]
+allow = ["kb_*", "ask_model"]
+max_tier = "fast"
+daily_usd = 0.25
+per_call_usd = 0.05
+max_tokens = 2000
+
+[profiles.researcher]
+allow = ["kb_*", "perplexity_*", "consensus_*", "firecrawl_*", "context7_*", "ask_model"]
+max_tier = "fast"
+daily_usd = 0.50
+per_call_usd = 0.05
+max_tokens = 2000
+
+[profiles.ui-designer]
+allow = ["kb_*", "playwright_*", "context7_*"]
+deny = ["playwright_browser_run_code_unsafe", "playwright_browser_file_upload"]
+max_tier = "fast"
+daily_usd = 0.0
+per_call_usd = 0.0
+max_tokens = 0
+
+[profiles.reader]   # knowledge base only, no model spend
+allow = ["kb_*"]
+max_tier = "fast"
+daily_usd = 0.0
+per_call_usd = 0.0
+max_tokens = 0
+
+# A small local model (a 4B model under llama.cpp, say) can't hold every tool schema in its context, so it gets the
+# two meta-tools: hub_search_tools returns 3-8 schemas, hub_call validates the arguments before it calls the tool.
+[profiles.local-llm]
+allow = ["kb_*", "context7_*", "perplexity_*", "ask_model", "hub_search_tools", "hub_call"]
+max_tier = "standard"
+deep_on_user_command = true
+daily_usd = 1.00
+per_call_usd = 0.20
+max_tokens = 3000
