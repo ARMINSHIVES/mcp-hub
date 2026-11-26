@@ -10,10 +10,10 @@ I run several agents (a coder, a writer, a researcher). They should not all see 
 
 ## Headline results
 
-- 33 tests pass against a live hub on a free port, with fake backends and a fake model (Windows 11, Python 3.11.9). No test spends money or touches a real service.
+- 49 tests pass against a live hub on a free port, with fake backends and a fake model (Windows 11, Python 3.11.9). No test spends money or touches a real service.
 - A test proves an agent's hub token never reaches a proxied backend.
 - The monthly cap in the example config is $20 for all profiles together, with a warning at 80% of it.
-- `claude -p` adds about 4,387 input tokens of its own prompt (measured 2026-11-22). The spend estimate reserves 5,000.
+- With `--safe-mode`, a short `claude -p` call used 994 input tokens in total, down from 10,670 when it loaded the user's CLAUDE.md and memory (measured 2026-11-25). The spend estimate still reserves 5,000, so it over-reserves.
 
 No benchmark numbers belong here: this is access control, not retrieval or modelling.
 
