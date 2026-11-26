@@ -176,3 +176,26 @@ def test_api_truncated_json_is_not_validated(tmp_path, monkeypatch):
     res = run(Asker(led, config.Budget(1.0), api=cut).ask(PROFILES["coder"], "hi", "fast", 50, json_schema=SCHEMA))
     assert res["truncated"] is True and "json" not in res and "max_tokens" in res["error"]
     led.close()
+
+
+def test_cli_failing_on_the_output_cap_is_truncated_not_an_error(cli):
+    cli["out"] = cli_out("API Error: Claude's response exceeded the 300 output token maximum. To configure this "
+                         "behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
+                         output_tokens=310, is_error=True, subtype="error_during_execution")
+    res = run(cli["asker"].ask(PROFILES["coder"], "Explain it all.", "fast", 300))
+    assert res["truncated"] is True and res["text"] == "" and "max_tokens" in res["error"]
+    assert ledger_rows(cli["ledger"]) == [("truncated", 310, 0.0123)]
+
+
+def test_cli_error_is_settled_at_the_cost_it_reported(cli):
+    cli["out"] = cli_out("API Error: overloaded", output_tokens=12, is_error=True)
+    with pytest.raises(ToolError, match="overloaded"):
+        run(cli["asker"].ask(PROFILES["coder"], "hi", "fast", 500))
+    assert ledger_rows(cli["ledger"]) == [("error", 12, 0.0123)]
+
+
+def test_cli_error_without_usage_is_settled_at_zero(cli):
+    cli["out"] = {"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "result": ""}
+    with pytest.raises(ToolError, match="error_max_budget_usd"):
+        run(cli["asker"].ask(PROFILES["coder"], "hi", "fast", 500))
+    assert ledger_rows(cli["ledger"]) == [("error", 0, 0.0)]

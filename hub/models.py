@@ -19,6 +19,7 @@ jsonschema and returns the value as `json`, or an `error` (ledger status "invali
 import asyncio
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -35,6 +36,7 @@ PRICE = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.00, 10.00), "
 HAIKU_LONG = (0.50, 2.50)
 CACHE_WRITE, CACHE_READ = 1.25, 0.10     # multipliers on the input price
 CLI_OVERHEAD_TOKENS = 5000               # claude -p adds its own prompt (measured 4,387 input tokens on 2026-11-22)
+CAP_ERROR = re.compile(r"exceeded the \d+ output token maximum")   # claude -p's wording for a cut reply
 CHARS_PER_TOKEN = 3                      # deliberately pessimistic, so the estimate over-reserves
 DEFAULT_SYSTEM = "Answer the request directly and concisely. The request comes from another assistant."
 
@@ -141,7 +143,13 @@ async def call_cli(model: str, system: str, prompt: str, max_tokens: int, budget
     reply = Reply(out.get("result") or "", inp, out_tok, float(out.get("total_cost_usd") or 0), "cli", truncated,
                   out.get("structured_output"))
     if out.get("is_error"):
-        raise ToolError(f"claude -p reported an error: {reply.text[:300] or out.get('subtype')}")
+        # Failing on CLAUDE_CODE_MAX_OUTPUT_TOKENS is a cut reply, not a failed call.
+        if CAP_ERROR.search(reply.text):
+            reply.truncated = True
+            return reply
+        err = ToolError(f"claude -p reported an error: {reply.text[:300] or out.get('subtype')}")
+        err.reply = reply   # so the ledger settles at the usage the CLI reported
+        raise err
     return reply
 
 
@@ -197,8 +205,11 @@ class Asker:
             sch = (json_schema,) if json_schema else ()
             r = await (self.api(model, system, prompt, max_tokens, *sch) if use_api
                        else self.cli(model, system, prompt, max_tokens, profile.per_call_usd, *sch))
-        except Exception:
-            self.ledger.settle(row, 0, 0, 0.0, "error")   # a failed call is not billed by either backend
+        except Exception as e:
+            # settled at what the backend reported spending before it failed, else $0
+            f = getattr(e, "reply", None)
+            self.ledger.settle(row, f.input_tokens if f else 0, f.output_tokens if f else 0,
+                               f.cost_usd if f else 0.0, "error")
             raise
         res = {"text": r.text, "model": model, "tier": tier, "backend": r.backend, "input_tokens": r.input_tokens,
                "output_tokens": r.output_tokens, "cost_usd": round(r.cost_usd, 6)}
