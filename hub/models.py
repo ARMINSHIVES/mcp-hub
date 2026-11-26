@@ -21,7 +21,9 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import jsonschema
 
@@ -39,6 +41,10 @@ CLI_OVERHEAD_TOKENS = 5000               # claude -p adds its own prompt (measur
 CAP_ERROR = re.compile(r"exceeded the \d+ output token maximum")   # claude -p's wording for a cut reply
 CHARS_PER_TOKEN = 3                      # deliberately pessimistic, so the estimate over-reserves
 DEFAULT_SYSTEM = "Answer the request directly and concisely. The request comes from another assistant."
+# claude -p reads CLAUDE.md, .claude/ settings and .mcp.json from its cwd and the folders above it, so it runs in an
+# empty folder outside any project.
+CLI_CWD = Path(tempfile.gettempdir()) / "mcp-hub-cli"
+
 
 
 def price(model: str, input_tokens: int) -> tuple[float, float]:
@@ -112,18 +118,23 @@ async def call_cli(model: str, system: str, prompt: str, max_tokens: int, budget
     exe = find_claude()
     if not exe:
         raise ToolError("No ANTHROPIC_API_KEY and no claude CLI found, so ask_model has no backend.")
-    # No tools, no MCP servers, no slash commands, no saved session: a plain completion.
-    cmd = [exe, "-p", "--model", model, "--output-format", "json", "--tools", "", "--strict-mcp-config",
+    # No tools, no MCP servers, no slash commands, no saved session: a plain completion. --safe-mode also drops the
+    # user's CLAUDE.md, auto memory, hooks, plugins and agents (thousands of input tokens per call, and replies
+    # that follow the user's rules or quote local paths) but keeps the subscription login. --bare would drop that login.
+    cmd = [exe, "-p", "--safe-mode", "--model", model, "--output-format", "json", "--tools", "", "--strict-mcp-config",
            "--no-session-persistence", "--disable-slash-commands", "--system-prompt", system,
            "--max-budget-usd", f"{max(budget_usd, 0.01):.2f}"]
     if json_schema:
         cmd += ["--json-schema", json.dumps(json_schema)]
-    env = {k: v for k, v in os.environ.items() if not k.startswith("HUB_TOKEN_")}
+    # With -p an API key in the env takes precedence and bills the API instead of the subscription.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("HUB_TOKEN_") and k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
+    CLI_CWD.mkdir(parents=True, exist_ok=True)
 
     def run():
         return subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", timeout=300,
-                              env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                              env=env, cwd=CLI_CWD, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     try:
         p = await asyncio.to_thread(run)
     except subprocess.TimeoutExpired as e:

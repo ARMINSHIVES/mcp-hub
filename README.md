@@ -93,6 +93,7 @@ Remote backends are proxied with `forward_incoming_headers=False`, so the agent'
 - Model IDs and prices in `hub/models.py` are as published on 2026-11-22. Check them before you rely on the caps.
 - The cost estimate is deliberately pessimistic (3 characters per token plus the full `max_tokens` of output), so it over-reserves.
 - `claude -p` reports an API-equivalent cost that isn't billed in money but counts toward usage limits. The ledger caps it the same way.
+- `claude -p` runs with `--safe-mode` in an empty folder under the system temp dir, without `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in its environment. It loads no CLAUDE.md, auto memory, hooks or plugins, and it stays on the subscription login (with `-p`, an API key in the environment would bill the API instead).
 - Proxied servers are started with `npx` at run time and keep their own licences. None is bundled.
 
 ## Licence

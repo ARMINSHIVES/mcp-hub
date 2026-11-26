@@ -1,6 +1,8 @@
 """ask_model on the `claude -p` backend (subprocess stubbed, no model call) and the optional json_schema."""
 import json
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastmcp.exceptions import ToolError
@@ -24,7 +26,7 @@ def cli(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kw):
         state["cmds"].append(cmd)
-        state["env"] = kw["env"]
+        state["env"], state["cwd"] = kw["env"], kw.get("cwd")
         return subprocess.CompletedProcess(cmd, 0, json.dumps(state["out"]), "")
     monkeypatch.setattr(models.subprocess, "run", fake_run)
     led = Ledger(tmp_path / "l.db")
@@ -51,6 +53,25 @@ def test_cli_plain_reply_unchanged(cli):
     assert "--json-schema" not in cli["cmds"][0]
     assert cli["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "500"
     assert ledger_rows(cli["ledger"]) == [("ok", 40, 0.0123)]
+
+
+def test_cli_loads_no_user_context_and_keeps_subscription_auth(cli, monkeypatch, tmp_path):
+    """The child must not see the user's CLAUDE.md, auto memory, hooks or project config, and with -p an API key in
+    the env would bill the API instead of the subscription."""
+    import hub.models as models
+    assert not models.CLI_CWD.is_relative_to(config.ROOT.parent)   # no CLAUDE.md or .claude/ above it
+    monkeypatch.setattr(models, "CLI_CWD", tmp_path / "cli-cwd")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-should-not-leak")
+    monkeypatch.setenv("HUB_TOKEN_CODER", "hub-secret")
+    cli["out"] = cli_out("NONE")
+    run(cli["asker"].ask(PROFILES["coder"], "hi", "fast", 500))
+    assert "--safe-mode" in cli["cmds"][0] and "--bare" not in cli["cmds"][0]
+    env = cli["env"]
+    assert not {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "HUB_TOKEN_CODER"} & set(env)
+    assert "CLAUDE_CONFIG_DIR" not in env or env["CLAUDE_CONFIG_DIR"] == os.environ.get("CLAUDE_CONFIG_DIR")
+    cwd = Path(cli["cwd"])
+    assert cwd == tmp_path / "cli-cwd" and cwd.is_dir() and not any(cwd.iterdir())
 
 
 def test_cli_reply_past_max_tokens_is_not_returned_as_its_tail(cli):
